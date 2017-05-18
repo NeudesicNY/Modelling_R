@@ -1,0 +1,226 @@
+---
+title: "CSCI E-63C Week 10 assignment: solution"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+library(randomForest)
+library(MASS)
+library(class)
+library(ggplot2)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Introduction
+
+In this assignment we will compare performance of random forest to that of LDA and KNN on a simulated dataset where we know exactly what is the association between predictors and outcome.  The relationship between predictor levels and the outcome will involve interaction that is notoriously difficult to model by methods such as LDA. The following example below illustrates the main ideas on a 3D dataset with two of the three attributes associated with the outcome:
+
+```{r}
+# How many observations:
+nObs <- 1000
+# How many predictors are associated with outcome:
+nClassVars <- 2
+# How many predictors are not:
+nNoiseVars <- 1
+# To modulate average difference between two classes' predictor values:
+deltaClass <- 1
+# Simulate dataset with interaction between attribute levels associated with the outcome:
+xyzTmp <- matrix(rnorm(nObs*(nClassVars+nNoiseVars)),nrow=nObs,ncol=nClassVars+nNoiseVars)
+classTmp <- 1
+for ( iTmp in 1:nClassVars ) {
+  deltaTmp <- sample(deltaClass*c(-1,1),nObs,replace=TRUE)
+  xyzTmp[,iTmp] <- xyzTmp[,iTmp] + deltaTmp
+  classTmp <- classTmp * deltaTmp
+}
+classTmp <- factor(classTmp > 0)
+table(classTmp)
+# plot resulting attribute levels colored by outcome:
+pairs(xyzTmp,col=as.numeric(classTmp))
+```
+
+We can see that it is the interaction between the first two variables that has influences the outcome (we simulated it this way, of course!) and that points belonging to each of the two classes cannot be readily separated by a single line in 2D (or a single surface in 3D).
+
+```{r}
+# Split data into train and test
+bTrain <- sample(c(FALSE,TRUE),nrow(xyzTmp),replace=TRUE)
+# Fit random forest to train data, obtain test error:
+rfRes <- randomForest(xyzTmp[bTrain,],classTmp[bTrain])
+rfTmpTbl <- table(classTmp[!bTrain],predict(rfRes,newdata=xyzTmp[!bTrain,]))
+rfTmpTbl
+```
+
+Random forest seems to do reasonably well on such dataset.
+
+```{r}
+# Fit LDA model to train data and evaluate error on the test data:
+ldaRes <- lda(xyzTmp[bTrain,],classTmp[bTrain])
+ldaTmpTbl <- table(classTmp[!bTrain],predict(ldaRes,newdata=xyzTmp[!bTrain,])$class)
+ldaTmpTbl
+```
+
+LDA, on the other hand, not so good! (not a surprise given what we've seen above).  What about a more flexible method such a KNN?  Let's check it out remembering that k -- number of neihbors -- in KNN is the parameter to modulate its flexibility (i.e. bias-variance tradeoff).
+
+```{r}
+# Fit KNN model at several levels of k:
+dfTmp <- NULL
+for ( kTmp in floor(1.2^(1:33)) ) {
+  knnRes <- knn(xyzTmp[bTrain,],xyzTmp[!bTrain,],classTmp[bTrain],k=kTmp)
+  tmpTbl <- table(classTmp[!bTrain],knnRes)
+  dfTmp <- rbind(dfTmp,data.frame(err=1-sum(diag(tmpTbl))/sum(tmpTbl),k=kTmp))
+}
+ggplot(dfTmp,aes(x=k,y=err))+geom_point()+scale_x_log10()+geom_hline(aes(yintercept = err,colour=type),data=data.frame(type=c("LDA","RF"),err=c(1-sum(diag(ldaTmpTbl))/sum(ldaTmpTbl),1-sum(diag(rfTmpTbl))/sum(rfTmpTbl))))+ggtitle("KNN error rate")
+```
+
+We can see from the above that there is a range of $k$ values where test error of KNN is the lowest and it is even lower that that of RF.  Now would be a good moment to think why one would want to choose RF over KNN or vice a versa for modeling the data if the figure above was representative of their true relative performance on a new dataset.
+
+For the purposes of the assignment you can use the code above (probably best to wrap reusable parts of it into function(s)) to generate data with varying numbers of predictors associated with outcome and not, different numbers of observations and differences in the average values of predictors' between two classes as required below. These differences between datasets and parameters of the call to random forest will illustrate some of the factors influencing relative performance of random forest, LDA and KNN classifiers.  When comparing to KNN performance, please choose value(s) of `k` such that it performs sufficiently well -- feel free to refer to the plot above to select useful value(s) of `k` that you would like to evaluate here.  Keep in mind also that the value of `k` cannot be larger than the number of observations in the training dataset.
+
+## Solution setup: some useful functions
+
+```{r}
+getCheckerBoardDataset <- function(inpNobs,inpNclassVars,inpNnullVars,inpDeltaClass) {
+  xRet <- matrix(rnorm(inpNobs*(inpNclassVars+inpNnullVars)),nrow=inpNobs,ncol=inpNclassVars+inpNnullVars)
+  cRet <- 1
+  for ( iTmp in 1:inpNclassVars ) {
+    dTmp <- sample(inpDeltaClass*c(-1,1),inpNobs,replace=TRUE)
+    xRet[,iTmp] <- xRet[,iTmp] + dTmp
+    cRet <- cRet * dTmp
+  }
+  cRet <- factor(as.numeric(cRet > 0))
+  list(x=xRet,class=cRet)
+}
+
+tmpDat <- getCheckerBoardDataset(500,2,3,1)
+
+pairs(tmpDat$x,col=as.numeric(factor(tmpDat$class)))
+
+getLDAknnRFerr <- function(inpTrainDat,inpTestDat, inpKvals,inpMtry=NULL) {
+  if ( is.null(inpMtry) ) {
+    inpMtry <- floor(sqrt(ncol(inpTrainDat$x)))
+  }
+  rfRes <- randomForest(inpTrainDat$x,inpTrainDat$class,mtry=inpMtry)
+  rfTmpTbl <- table(inpTestDat$class,predict(rfRes,newdata=inpTestDat$x))
+  ldaRes <- lda(inpTrainDat$x,inpTrainDat$class)
+  ldaTmpTbl <- table(inpTestDat$class,predict(ldaRes,newdata=inpTestDat$x)$class)
+  dfTmp <- data.frame(type=c("LDA","RF"),err=c(1-sum(diag(ldaTmpTbl))/sum(ldaTmpTbl),1-sum(diag(rfTmpTbl))/sum(rfTmpTbl)))
+  for ( kTmp in inpKvals ) {
+    # cap k in KNN to the size of training data:
+    knnRes <- knn(inpTrainDat$x,inpTestDat$x,inpTrainDat$class,k=ifelse(kTmp > nrow(inpTrainDat$x),nrow(inpTrainDat$x),kTmp))
+    tmpTbl <- table(inpTestDat$class,knnRes)
+    dfTmp <- rbind(dfTmp,data.frame(type=paste0("KNN",kTmp),err=1-sum(diag(tmpTbl))/sum(tmpTbl)))
+  }
+  dfTmp
+}
+
+retErrs <- getLDAknnRFerr(tmpDat,getCheckerBoardDataset(10000,2,3,1),c(1,2,5,10,20,50,100,200))
+ggplot(retErrs[grep("KNN",retErrs$type),],aes(x=as.numeric(gsub("KNN","",type)),y=err))+geom_point()+scale_x_log10()+geom_hline(data=retErrs[-grep("KNN",retErrs$type),],aes(yintercept=err,colour=type))+xlab("Nearest neighbors no.")+ylab("Test error")+scale_colour_discrete(name="Method")
+```
+
+# Sub-problem 1 (15 points): effect of sample size
+
+Generate datasets with `nObs=50`, `200` and `1000` observations (approximately evenly split between training and test datasets), two variables associated with the outcome as parameterized above and three not associated, and average difference between two classes same as above (i.e. in the notation from the above code `nClassVars=2`, `nNoisevars=3` and `deltaClass=1`).  Obtain random forest, LDA and KNN test error rates.  Describe the differences between different methods and across the sample sizes used here.
+
+## Solution
+
+```{r}
+## Sample size
+dfTmp <- NULL
+dClassTmp <- 1
+#for ( nTmp in c(200,500,1000,2000,5000,10000) ) {
+for ( nTmp in c(25,100,500) ) {
+  for ( iSim in 1:3 ) {
+    tmpDat <- getCheckerBoardDataset(nTmp,2,3,dClassTmp)
+    dfTmp <- rbind(dfTmp,data.frame(n=nTmp,sim=iSim,getLDAknnRFerr(tmpDat,getCheckerBoardDataset(10000,2,3,dClassTmp),c(1,2,5,10,20,50,100,200))))
+  }
+}
+ggplot(dfTmp[grep("KNN",dfTmp$type),],aes(x=as.numeric(gsub("KNN","",type)),y=err,colour=factor(sim),shape=factor(sim)))+geom_point()+scale_x_log10()+geom_hline(data=dfTmp[-grep("KNN",dfTmp$type),],aes(yintercept=err,colour=type))+facet_wrap(~n)+scale_colour_discrete(name="Method",breaks=c("LDA", "RF"),labels=c("LDA", "RF"))+scale_shape_discrete(guide=FALSE)+xlab("Nearest neighbors no.")+ylab("Test error")+geom_hline(yintercept=2*pnorm(dClassTmp,lower.tail=FALSE)*(1-pnorm(dClassTmp,lower.tail=FALSE)),linetype=2)
+```
+
+For greater stability of the results, let's provide training data of fixed size (i.e. n=25, 100 and 500) and test data of much larger size (e.g. n=10000).  The results of this simulation are shown graphically above.  Constant error rates at higher values of $k$ in KNN for smaller sample sizes correspond to cases when requested number of nearest neighbors to use exceeds total number of observations in training data and majority vote is used for classification.  For the smallest sample size of the training dataset (n=25) used it can be seen that both LDA and random forest (at least with default parameters) achieve error rate close to majority vote/coin toss in this case.  For lower values of $k$ KNN appears to do better by about 10%.  There is modest improvement in error rate with the increase in training sample size to n=100 (for random forest and for KNN) - for LDA it stays about the same, but then we wouldn't LDA to be able to do anything useful on this data knowing what the true association is between the predictors and the outcome.  Further increase in sample size to n=500 reduces error rate for KNN and random forest even further getting close to the error rate of Bayes classifier indicated with horizontal dashes in the plots (corresponding to Bayes decision boundaries of $X_1=0$ and $X_2=0$ where $X_1,X_2$ are the two covariates that are associated with the outcome in this case).
+
+# Sub-problem 2 (15 points): effect of signal magnitude
+
+For sample sizes of `nObs=200` and `1000` observations (approximately evenly split into training and test datasets) simulate data as shown above with average differences between the two classes that are same as above, half of that and twice that (`deltaClass=0.5`, `1` and `2`).  Obtain and plot test error rates of random forest, LDA and KNN for each of the six (two samples sizes times three signal magnitudes) combinations of sample size and signal strengths.  Describe the most pronounced differences across error rates for those datasets: does the increase in the number of observations impact the error rate of the models?  Does change in the magnitude of signal impact their performance?  Are different classifier approaches impacted in a similar way?
+
+## Solution
+
+```{r}
+## Signal strength
+dfTmp <- NULL
+for ( nTmp in c(100,500) ) {
+  for ( dClassTmp in c(0.5,1,2) ) {
+    for ( iSim in 1:3 ) {
+      tmpDat <- getCheckerBoardDataset(nTmp,2,3,dClassTmp)
+      dfTmp <- rbind(dfTmp,data.frame(n=nTmp,sim=iSim,delta=dClassTmp,getLDAknnRFerr(tmpDat,getCheckerBoardDataset(10000,2,3,dClassTmp),c(1,2,5,10,20,50,100,200))))
+    }
+  }
+}
+ggplot(dfTmp[grep("KNN",dfTmp$type),],aes(x=as.numeric(gsub("KNN","",type)),y=err))+geom_point()+scale_x_log10()+geom_hline(data=dfTmp[-grep("KNN",dfTmp$type),],aes(yintercept=err,colour=type))+facet_wrap(~n+delta)+scale_colour_discrete(name="Method")+xlab("Nearest neighbors no.")+ylab("Test error")+geom_hline(aes(yintercept=2*pnorm(delta,lower.tail=FALSE)*(1-pnorm(delta,lower.tail=FALSE))),linetype=2)
+```
+
+For greater stability of the results, providing training data of fixed size (i.e. n=100 and 500) and test data of much larger size (e.g. n=10000).  The results of this simulation are shown graphically above.  Constant error rates at higher values of $k$ in KNN for the smaller sample size correspond to cases when requested number of nearest neighbors to use exceeds total number of observations in training data and majority vote is used for classification. Error rates of Bayes classifier (lowest error rates theoretically possible for a given problem) are indicated with horizontal dashes -- they are just below 50% for the lowest signal magnitude evaluated here and close to zero for the largest difference between bivariate normal distributions associated with the outcome.  For the largest sample size both random forest and KNN classifier error rate closely approach those best theoretically possible.
+
+# Sub-problem 3 (15 points): varying counts of predictors
+
+For all possible pairwise combinations of the numbers of variables associated with outcome (`nClassVars=2` and `5`) and those not associated with the outcome (`nNoiseVars=1`, `3` and `10`) -- six pairwise combinations in total -- obtain and present graphically test errors from random forest, LDA and KNN.  Choose signal magnitude (`deltaClass`) so that it will yield non-trivial results -- noticeable variability in the error rates across those six pairwise combinations of attribute counts.  Describe the results: what is the impact of the increase of the number of attributes associated with the outcome on the classifier performance?  What about the number of attributes not associated with outcome - does it affect classifier error rate?  Are different classifier methods affected by these simulation parameters in a similar way?
+
+## Solution
+
+```{r}
+# Bayes error for checkerboard in pInp dimensions with 2^pInp multivariate normals
+# centered in each orthant at pInp-dimensional dInp with proper signs
+getCBbayesError <- function(dInp,pInp) {
+  pTmp <- pnorm(dInp)
+  qTmp <- 1-pTmp
+  eRet <- 0
+  for ( iTmp in 0:pInp ) {
+    if ( iTmp %% 2 == 1 ) {
+      eRet <- eRet + choose(pInp,iTmp)*pTmp^(pInp-iTmp)*qTmp^iTmp
+    }
+  }
+  eRet
+}
+## Number of class and null variables
+dfTmp <- NULL
+for ( nAltTmp in c(2,5) ) {
+  dClassTmp <- ifelse(nAltTmp==2,1.05,1.5)
+  for ( nNullTmp in c(1,3,10) ) {
+    for ( iSim in 1:3 ) {
+      tmpDat <- getCheckerBoardDataset(1000,nAltTmp,nNullTmp,dClassTmp)
+      dfTmp <- rbind(dfTmp,data.frame(nNull=nNullTmp,nAlt=nAltTmp,delta=dClassTmp,bce=getCBbayesError(dClassTmp,nAltTmp),sim=iSim,getLDAknnRFerr(tmpDat,getCheckerBoardDataset(10000,nAltTmp,nNullTmp,dClassTmp),c(1,2,5,10,20,50,100,200))))
+    }
+  }
+}
+ggplot(dfTmp[grep("KNN",dfTmp$type),],aes(x=as.numeric(gsub("KNN","",type)),y=err))+geom_point()+scale_x_log10()+facet_wrap(~nAlt+nNull)+geom_hline(data=dfTmp[-grep("KNN",dfTmp$type),],aes(yintercept=err,colour=type))+geom_hline(aes(yintercept=bce),linetype=2)+xlab("Nearest neighbors no.")+ylab("Test error")+scale_colour_discrete(name="Method")
+```
+
+The centers of multivariate normals in p=2 and p=5 dimensions were chosen to yield approximately comparable Bayes error rates in both cases.  One can see that in higher dimensional case error rates are further away from the best theoretically achievable -- likely due to dimensionality curse kind of reasons. Higher number of variables not associated with the outcome also increases error rate. Notice how for too large values of $k$ misclassification rate when p=5 can exceed that of majority vote.  Apparently for interaction in p=5 dimensions (certainly a tough problem to solve well) and training sample size of n=1000 (i.e. about 30 points in each orthant) used here random forest cannot do noticeably better than a coin toss. 
+
+
+
+# Sub-problem 4: (15 points): effect of `mtry`
+
+`mtry` parameter in the call to `randomForest` defines the number of predictors randomly chosen to be evaluated for their association with the outcome at each split (please see help page for `randomForest` for more details).  By default for classification problem it is set as a square root of the number of predictors in the dataset.  Here we will evaluate the impact of using different values of `mtry` on the error rate by random forest.
+
+For `nObs=5000`, `deltaClass=2`, `nClassVars=3` and `nNoiseVars=20` generate data using the above approach and run `randomForest` on it with `mtry=2`, `5` and `10`.  Describe the impact of using different values of `mtry` on the error rate by random forest -- compare it to that by LDA/KNN. 
+
+## Solution
+
+```{r}
+## mtry
+dfTmp <- NULL
+nAltTmp <- 3
+nNullTmp <- 20
+dClassTmp <- 2
+for ( mTry in c(2,5,10) ) {
+  for ( iSim in 1:3 ) {
+    tmpDat <- getCheckerBoardDataset(2500,nAltTmp,nNullTmp,dClassTmp)
+    dfTmp <- rbind(dfTmp,data.frame(nNull=nNullTmp,nAlt=nAltTmp,mtry=mTry,bce=getCBbayesError(dClassTmp,nAltTmp),sim=iSim,getLDAknnRFerr(tmpDat,getCheckerBoardDataset(10000,nAltTmp,nNullTmp,dClassTmp),c(1,2,5,10,20,50,100,200),inpMtry=mTry)))
+  }
+}
+ggplot(dfTmp[grep("KNN",dfTmp$type),],aes(x=as.numeric(gsub("KNN","",type)),y=err))+geom_point()+scale_x_log10()+geom_hline(data=dfTmp[-grep("KNN",dfTmp$type),],aes(yintercept=err,colour=type))+facet_wrap(~mtry)+geom_hline(aes(yintercept=bce),linetype=2)+xlab("Nearest neighbors no.")+ylab("Test error")+scale_colour_discrete(name="Method")
+```
+
+`mtry` defines the number of variables randomly selected to be evaluated for use at each split in the random forest trees -- if they do not include any truly associated with the outcome resulting split will be uninformative.  For 3 out of 23 variables associated with the outcome in this simulation, use of `mtry=2`, `5` and `10` will result in approximately `r signif(100*(20/23)^2,2)`, `r signif(100*(20/23)^5,2)`  and `r signif(100*(20/23)^10,2)`% of the sets variables evaluated for use in splits that do not include any of those 3 that are associated with the outcome.  One can see from the plots above that lower percentage of splits selected using variables associated with the outcome result in higher error rate.  Error rates for LDA and KNN are not affected by change in `mtry` (that is only relevant for random forest) -- LDA does not come up with a useful decision boundary and KNN error rate for larger values of $k$ approaches that of Bayes classifier.

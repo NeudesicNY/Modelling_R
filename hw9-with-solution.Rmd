@@ -1,0 +1,287 @@
+---
+title: "CSCI E-63C Week 9 assignment: solution"
+output:
+  html_document:
+    toc: true
+---
+
+```{r setup, include=FALSE}
+library(MASS)
+library(class)
+library(ggplot2)
+library(reshape2)
+library(ROCR)
+library(e1071)
+library(GGally)
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+# Preface
+
+For this assignment we will use banknote authentication data (the one we worked with in week 2 assignment) to fit logistics regression model and evaluate performance of LDA, QDA and KNN classifiers.  As we have seen earlier this dataset should allow to predict which banknotes are authentic and which ones are forged fairly well, so we should expect to see low error rates for our classifiers.  We will evaluate whether some of those tools perform better than others on this data.
+
+Read in and summarize the data as before to refresh our memory:
+
+```{r readData,fig.height=6,fig.width=6}
+dbaDat <- read.table("data_banknote_authentication.txt",sep=",")
+colnames(dbaDat) <- c("var","skew","curt","entr","auth")
+dbaDat$auth <- factor(dbaDat$auth)
+dim(dbaDat)
+summary(dbaDat)
+head(dbaDat)
+ggpairs(dbaDat,aes(colour=auth))
+```
+
+
+
+# Problem 1 (10 points): logistic regression
+
+Fit logistic regression model of the class attribute using remaining four attributes as predictors in the model.  Produce summary of the model, describe which attributes appear to be significantly associated with the categorical outcome in this model.  Use this model to make predictions on the entire dataset and compare these predictions and corresponding true values of the class attribute using confusion matrix (i.e. contingency table).  Calculate error rate (would this be training or test error in this case?), sensitivity and specificity (assuming that we are predicting class "1").  Describe the results.
+
+## Solution
+
+```{r logreg}
+glmRes <- glm(auth~var+skew+curt+entr,data=dbaDat,family=binomial)
+summary(glmRes)
+glmPred <- predict(glmRes,type="response")>0.5
+table(dbaDat[,"auth"],glmPred)
+summPreds <- function(inpPred,inpTruth,inpMetrNms=c("err","acc","sens","spec")) {
+  retVals <- numeric()
+  for ( metrTmp in inpMetrNms ) {
+    retVals[metrTmp] <- performance(prediction(inpPred,inpTruth),measure=metrTmp)@y.values[[1]][2]
+  }
+  retVals
+}
+summPreds(as.numeric(1+glmPred),as.numeric(dbaDat[,"auth"]))
+```
+
+```{r bootPvals,warning=FALSE}
+bootPvals <- summary(glmRes)$coefficients[,'Pr(>|z|)']
+for ( iBoot in 1:100 ) {
+  bootPvals <- rbind(bootPvals,summary(glm(auth~var+skew+curt+entr,data=dbaDat[sample(nrow(dbaDat),nrow(dbaDat),replace=TRUE),],family=binomial,control=list(maxit=100)))$coefficients[,'Pr(>|z|)'])
+}
+old.par <- par(mfrow=c(1,2),ps=16)
+plot(bootPvals[-1,2:3],log="xy",xlim=range(bootPvals[,2:3]),ylim=range(bootPvals[,2:3]))
+points(bootPvals[1,2],bootPvals[1,3],pch=20,col=2,cex=2)
+abline(0,1,lty=2)
+plot(bootPvals[-1,4:5],log="xy",xlim=range(bootPvals[,4:5]),ylim=range(bootPvals[,4:5]))
+points(bootPvals[1,4],bootPvals[1,5],pch=20,col=2,cex=2)
+abline(0,1,lty=2)
+par(old.par)
+```
+
+Warning "fitted probabilities numerically 0 or 1 occurred" issued by `glm` above indicates that some observations are so far from decision boundary, that their respective probabilities of belonging to one of the classes are (within numerical precision) equal to zero or one.  Overall (training) error in this case (shown above) is less than 1%.  Sensitivity and specificity (both above 99%) are shown above.  Variance, skewness and curtosis are by far more significantly associated with the class we are predicting here than entropy.  Two plots above compare p-values for variance and skeweness as well as curtosis and entropy over `r nrow(bootPvals)-1` boostraps (black circles) as well as for the original dataset (red dots) -- more significant association of curtosis with the outcome than that of entropy is illustrated by the cloud of points in the right panel that are notably higher than $y=x$ diagonal (dashed line); such call (which attribute is more significantly associated with the outcome) is less obvious when comparing variance and skewness (left panel) as bootstap results essentially following $y=x$ line (diagonal dashes) with roughly comparable fraction of them falling on each side of it: `r 100*mean(bootPvals[-1,2:3]%*%c(1,-1)<0)`% of bootstraps had $Pr(skewness)>Pr(variance)$.
+
+# Problem 2 (10 points): LDA and QDA
+
+Using LDA and QDA implementations available in the package `MASS`, calculate confusion matrix, (training) error rate, sensitivity and specificity for each of them.  Compare them to those of logistic regression.  Describe the results.
+
+## Solution
+
+```{r lda}
+ldaRes <- lda(auth~var+skew+curt+entr,data=dbaDat)
+ldaPred <- predict(ldaRes)$class
+table(dbaDat[,"auth"],ldaPred)
+summPreds(as.numeric(ldaPred),as.numeric(dbaDat[,"auth"]))
+```
+
+```{r qda}
+qdaRes <- qda(auth~var+skew+curt+entr,data=dbaDat)
+qdaPred <- predict(qdaRes)$class
+table(dbaDat[,"auth"],qdaPred)
+summPreds(as.numeric(qdaPred),as.numeric(dbaDat[,"auth"]))
+```
+
+LDA and QDA predictions (on training data) have higher  sensitivity and lower specificity than those obtained for logistic regression above.  Their overall error is higher than that for logistic regression -- more so for LDA implying that curvature of decision surface could be an important feature of this data (we will be able to state it with greater confidence once we evaluate performance for test data).
+
+# Problem 3 (10 points): KNN
+
+Using `knn` from library `class`, calculate confusion matrix, error rate, sensitivity/specificity for  one and ten nearest neighbors models.  Compare them to corresponding results from LDA, QDA and logistic regression. Describe results of this comparison -- discuss whether it is surprising to see low *training* error for KNN classifier with $k=1$.
+
+## Solution
+
+```{r knn}
+dfTmp <- NULL
+for ( kTmp in 1:100 ) {
+  knnPred <- knn(dbaDat[,colnames(dbaDat)!="auth"],dbaDat[,colnames(dbaDat)!="auth"],dbaDat$auth,k=kTmp)
+  tmpVals <- summPreds(as.numeric(knnPred),as.numeric(dbaDat[,"auth"]))
+  dfTmp <- rbind(dfTmp,data.frame(k=kTmp,metric=names(tmpVals),value=tmpVals))
+}
+ggplot(dfTmp,aes(x=k,y=value,colour=metric))+geom_point()+facet_wrap(~metric,scales="free")
+```
+
+Plots above indicate that KNN performance on *training* data is the best when about twenty or fewer nearest neighbors are used for classification.  Use of $k=1$ on training data is expected to yield perfect  accuracy (assuming that there are no identical observations with discordant class assignments) as each observation will be assigned its own class by definition.
+
+
+# Problem 4 (30 points): compare test errors of logistic regression, LDA, QDA and KNN
+
+Using resampling approach of your choice (e.g. cross-validation, bootstrap, etc.) obtain test error as well as sensitivity and specificity for each of these methods (logistic regression, LDA, QDA, KNN with $k=1,2,5,10,20,50,100$).  Present results in the form of boxplots, compare test error/sensitivity/specificity across these methods and discuss their relative performance.
+
+## Solution
+
+```{r}
+## unused call to cv.glm using classification error as cost function:
+##cv.glm(dbaDat,glmRes,K=5,cost=function(x,y)mean(as.numeric(factor(x))!=as.numeric(factor(y>0.5))))$delta
+```
+
+```{r testerr,warning=FALSE}
+# warning=FALSE in knitr clause prevents well understood warnings from cluttering the output
+dfTmp <- NULL
+for ( iResample in 1:2 ) {
+  for ( iSim in 1:30 ) {
+    trainIdx <- sample(nrow(dbaDat),0.67*nrow(dbaDat))
+    if ( iResample == 2 ) {
+      trainIdx <- sample(nrow(dbaDat),nrow(dbaDat),replace=TRUE)
+    }
+    # logistic regression:
+    glmTrain <- glm(auth~var+skew+curt+entr,data=dbaDat[trainIdx,],family=binomial)
+    glmTestPred <- predict(glmTrain, newdata=dbaDat[-trainIdx,], type="response") > 0.5
+    tmpVals <- summPreds(as.numeric(glmTestPred)+1,as.numeric(dbaDat[-trainIdx,"auth"]))
+    dfTmp <- rbind(dfTmp,data.frame(resample=c("train/test","bootstrap")[iResample],type="glm",metric=names(tmpVals),value=tmpVals))
+    # LDA:
+    ldaTrain <- lda(auth~var+skew+curt+entr,data=dbaDat[trainIdx,])
+    ldaTestPred <- predict(ldaTrain, dbaDat[-trainIdx,])$class
+    tmpVals <- summPreds(as.numeric(ldaTestPred),as.numeric(dbaDat[-trainIdx,"auth"]))
+    dfTmp <- rbind(dfTmp,data.frame(resample=c("train/test","bootstrap")[iResample],type="lda",metric=names(tmpVals),value=tmpVals))
+    # QDA:
+    qdaTrain <- qda(auth~var+skew+curt+entr,data=dbaDat[trainIdx,])
+    qdaTestPred <- predict(qdaTrain, dbaDat[-trainIdx,])$class
+    tmpVals <- summPreds(as.numeric(qdaTestPred),as.numeric(dbaDat[-trainIdx,"auth"]))
+    dfTmp <- rbind(dfTmp,data.frame(resample=c("train/test","bootstrap")[iResample],type="qda",metric=names(tmpVals),value=tmpVals))
+    # NB:
+    nbTrain <- naiveBayes(auth~var+skew+curt+entr,data=dbaDat[trainIdx,])
+    nbTestPred <- predict(nbTrain, dbaDat[-trainIdx,])
+    tmpVals <- summPreds(as.numeric(nbTestPred),as.numeric(dbaDat[-trainIdx,"auth"]))
+    dfTmp <- rbind(dfTmp,data.frame(resample=c("train/test","bootstrap")[iResample],type="nb",metric=names(tmpVals),value=tmpVals))
+    # KNN:
+    for ( kTmp in c(1,2,5,10,20,50,100) ) {
+      knnTestPred <- knn(dbaDat[trainIdx,colnames(dbaDat)!="auth"],dbaDat[-trainIdx,colnames(dbaDat)!="auth"],dbaDat[trainIdx,"auth"],k=kTmp)
+      tmpVals <- summPreds(as.numeric(knnTestPred),as.numeric(dbaDat[-trainIdx,"auth"]))
+      dfTmp <- rbind(dfTmp,data.frame(resample=c("train/test","bootstrap")[iResample],type=paste0("k",kTmp),metric=names(tmpVals),value=tmpVals))
+   }
+  }
+}
+ggplot(dfTmp,aes(x=type,y=100*value,colour=type)) + geom_boxplot() + facet_wrap(~resample+metric,ncol=4,scales="free") + xlab("") + ylab("") + theme(axis.text.x = element_text(angle = 90, hjust = 1))
+```
+
+Performance of logistic regression, LDA, QDA and KNN classifiers on test data for several values of $k$ is summarized graphically above by several metrics (on percentage scale) and two different approaches for resampling.  These results can be summarized as follows:
+
+* best performing classifiers are those by KNN with approximately under ten nearest neighbors used for classification
+* the worst performing model is the naive Bayes classifier (as for why, please see below)
+* for larger number of nearest neighbors KNN performance progressively decreases as expected
+* aside from KNN, logistic regression has the highest performance, followed by LDA and QDA (in this order)
+* these conclusions are insensitive to whether training/test data was obtained by bootstrap or by splitting data 2-to-1 for training and test respectively
+
+Above observations suggest that the decision boundary between two classes in this problem is sufficiently non-linear and locally irregular so that methods such logistic regression and QDA do not approximate it as successfully as nearest-neighbors approach.
+
+
+# Extra 10 points problem: naive Bayes classifier performance
+
+Fit naive Bayes classifier (see lecture slides for examples of using `naiveBayes` function from package `e1071`) on banknote authentication dataset and assess its performance on test data by resampling along with logistic regression, LDA, QDA and KNN in Problem 4 above.  In other words, add naive Bayes to the rest of the methods evaluated above. 
+
+## Solution
+
+We saw above that naive Bayes performs much worse than any other methods tested here.  Now let's understand why.  One phrase answer is that this dataset substantially deviates from the naive Bayes' assumption of diagonal covariance matrix/conditional independence of predictor variables, but what exactly does this mean?
+
+For the first two attributes (variance and skewness) -- by eye, the most associated with banknote class univariately -- the training errors of LDA and naive Bayes are highly comparable:
+
+```{r}
+ldaTmp <- lda(auth~.,dbaDat[,c(1,2,5)])
+table(predict(ldaTmp)$class,dbaDat$auth)
+nbTmp <- naiveBayes(auth~.,dbaDat[,c(1,2,5)])
+table(predict(nbTmp,dbaDat[,1:2]),dbaDat$auth)
+```
+
+When curtosis is added to the model (the attribute strongly negative correlated with variance and even more so with skewness), training error for LDA decreases, while for naive Bayes it goes up:
+
+```{r}
+ldaTmp <- lda(auth~.,dbaDat[,c(1:3,5)])
+table(predict(ldaTmp)$class,dbaDat$auth)
+nbTmp <- naiveBayes(auth~.,dbaDat[,c(1:3,5)])
+table(predict(nbTmp,dbaDat[,1:3]),dbaDat$auth)
+```
+
+Let's see which observations get classified differently by `lda` and `naiveBayes` as curtosis gets added to the model (large symbols indicate observations classifed differently by LDA and naive Bayes):
+
+```{r,fig.width=6,fig.height=6}
+for ( iTmp in 2:4 ) {
+  ldaPredsTmp <- predict(lda(auth~.,dbaDat[,c(1:iTmp,5)]))$class
+  nbPredsTmp <- predict(naiveBayes(auth~.,dbaDat[,c(1:iTmp,5)]),newdata=dbaDat[,1:iTmp])
+  pairs(dbaDat[,1:iTmp],col=as.numeric(factor(dbaDat$auth)),cex=1-0.75*(nbPredsTmp == ldaPredsTmp),pch=0+(nbPredsTmp == ldaPredsTmp))
+}
+```
+
+We can notice that when only variance and skewness is used (first 2x2 panel) only few observations are classified differently by LDA and naive Bayes.  However, once curtosis is added to the variables used by the models many more observations become classified differently by these two approaches.  Lastly, addition of entropy on top of that does not result in qualitative changes.
+
+To simplify this example even further, notice that it is in the space of skewness and curtosis (two most correlated attributes) where the discrepancy between LDA and naive Bayes is the most pronounced:
+
+```{r,fig.width=6,fig.height=6}
+for ( iTmp in 1:2 ) {
+  idxTmp <- c(iTmp,3,5)
+  ldaPredsTmp <- predict(lda(auth~.,dbaDat[,idxTmp]))$class
+  nbPredsTmp <- predict(naiveBayes(auth~.,dbaDat[,idxTmp]),newdata=dbaDat[,idxTmp[-length(idxTmp)]])
+  pairs(dbaDat[,idxTmp[-length(idxTmp)]],col=as.numeric(factor(dbaDat$auth)),cex=1-0.75*(nbPredsTmp == ldaPredsTmp),pch=0+(nbPredsTmp == ldaPredsTmp))
+}
+```
+
+Must have something to do with this correlation between predictor attributes that naive Bayes disregards.  Here are the decision boundaries by LDA and naive Bayes -- we can see that LDA assuming common (not necessarily diagonal!) covariance matrix for observations in each class estimates more reasonable decision boundary than naive Bayes assuming their independence:
+
+```{r,fig.height=6,fig.width=12}
+old.par <- par(mfrow=c(1,2),ps=16)
+xGridTmp <- (-40:40)/2
+yGridTmp <- (-40:40)/2
+xyGridTmp <- cbind(rep(xGridTmp,length(yGridTmp)),sort(rep(yGridTmp,length(xGridTmp))))
+colnames(xyGridTmp) <- colnames(dbaDat)[2:3]
+plot(dbaDat[,2:3],col=c("red","blue")[dbaDat$auth],main="Naive Bayes",xlim=c(-15,15),ylim=c(-15,15))
+points(xyGridTmp,col=c("red","blue")[predict(naiveBayes(auth~.,dbaDat[,c(2:3,5)]),newdata=xyGridTmp)],pch=20,cex=0.5)
+points(unlist(lapply(unstack(dbaDat,skew~auth),mean)),unlist(lapply(unstack(dbaDat,curt~auth),mean)),cex=2,pch=3,lwd=2,col=c("red","blue"))
+plot(dbaDat[,2:3],col=c("red","blue")[dbaDat$auth],main="LDA",xlim=c(-15,15),ylim=c(-15,15))
+points(xyGridTmp,col=c("red","blue")[predict(lda(auth~.,dbaDat[,c(2:3,5)]),data.frame(xyGridTmp))$class],pch=20,cex=0.5)
+points(unlist(lapply(unstack(dbaDat,skew~auth),mean)),unlist(lapply(unstack(dbaDat,curt~auth),mean)),cex=2,pch=3,lwd=2,col=c("red","blue"))
+par(old.par)
+```
+
+At this point we can already see that it is the correlation between predictors that naive Bayes assumes is zero that results in misclassifying by naive Bayes of a larger fraction of observations than that by LDA, but let's now add decision boundary obtained by comparing products of data likelihoods of each class assuming independence of skewness and curtosis:
+
+```{r,fig.width=12,fig.height=6}
+old.par <- par(mfrow=c(1,2),ps=16)
+plot(dbaDat[,2:3],col=c("red","blue")[dbaDat$auth],main="Naive Bayes",xlim=c(-15,15),ylim=c(-15,15))
+points(xyGridTmp,col=c("red","blue")[predict(naiveBayes(auth~.,dbaDat[,c(2:3,5)]),newdata=xyGridTmp)],pch=20,cex=0.5)
+points(unlist(lapply(unstack(dbaDat,skew~auth),mean)),unlist(lapply(unstack(dbaDat,curt~auth),mean)),cex=2,pch=3,lwd=2,col=c("red","blue"))
+px1 <- dnorm(xyGridTmp[,1],mean=mean(dbaDat[dbaDat$auth==1,2]),sd=sd(dbaDat[dbaDat$auth==1,2]))
+px0 <- dnorm(xyGridTmp[,1],mean=mean(dbaDat[dbaDat$auth==0,2]),sd=sd(dbaDat[dbaDat$auth==0,2]))
+py1 <- dnorm(xyGridTmp[,2],mean=mean(dbaDat[dbaDat$auth==1,3]),sd=sd(dbaDat[dbaDat$auth==1,3]))
+py0 <- dnorm(xyGridTmp[,2],mean=mean(dbaDat[dbaDat$auth==0,3]),sd=sd(dbaDat[dbaDat$auth==0,3]))
+plot(dbaDat[,2:3],col=c("red","blue")[dbaDat$auth],xlim=c(-15,15),ylim=c(-15,15),main=expression(paste(paste(Pr,group("{",paste(group("",X,"|"),red),"}")),paste(Pr,group("{",paste(group("",Y,"|"),red),"}")))==paste(paste(Pr,group("{",paste(group("",X,"|"),blue),"}")),paste(Pr,group("{",paste(group("",Y,"|"),blue),"}")))))
+points(xyGridTmp,col=c("red","blue")[as.numeric(px1*py1>px0*py0)+1],pch=20,cex=0.5)
+par(old.par)
+```
+
+Finally, lets simulate three datasets with varying amount of correlation between predictor variables and compare performance of LDA and naive Bayes in this scenario:
+
+```{r,fig.width=12,fig.height=8}
+old.par <- par(mfcol=c(2,3),ps=16)
+nObsTmp <- 1000
+for ( iMult in 0:2 ) {
+  xyTmp <- matrix(rnorm(4*nObsTmp),ncol=2)
+  xyTmp[1:nObsTmp,2] <- xyTmp[1:nObsTmp,2] + 1
+  xyTmp[-(1:nObsTmp),2] <- xyTmp[-(1:nObsTmp),2] - 1
+  cTmp <- sort(rep(1:2,nObsTmp))
+  xyTmp[,2] <- xyTmp[,2] + iMult * xyTmp[,1]
+  xyGridTmp <- apply(xyTmp,2,function(x){x <- seq(min(x),max(x),range(x)%*%c(-1,1)/50);rep(x,length(x))})
+  xyGridTmp[,2] <- sort(xyGridTmp[,2])
+  plot(xyTmp,col=c("red","blue")[cTmp],xlab="",ylab="",main="LDA")
+  ldaTmp <- lda(z~.,data.frame(xyTmp,z=cTmp))
+  ldaTrainTblTmp <- table(cTmp,predict(ldaTmp)$class)
+  points(xyGridTmp,col=c("red","blue")[as.numeric(predict(ldaTmp,data.frame(xyGridTmp))$class)],pch=20,cex=0.5)
+  mtext(paste("Train err:",1-sum(diag(ldaTrainTblTmp))/sum(ldaTrainTblTmp)),cex=0.8)
+  plot(xyTmp,col=c("red","blue")[cTmp],xlab="",ylab="",main="Naive Bayes")
+  nbTmp <- naiveBayes(z~.,data.frame(xyTmp,z=factor(cTmp)))
+  nbTrainTblTmp <- table(cTmp,predict(nbTmp,data.frame(xyTmp)))
+  points(xyGridTmp,col=c("red","blue")[as.numeric(predict(nbTmp,data.frame(xyGridTmp)))],pch=20,cex=0.5)
+  mtext(paste("Train err:",signif(1-sum(diag(nbTrainTblTmp))/sum(nbTrainTblTmp),2)),cex=0.8)
+}
+par(old.par)
+```
+
+Easy to see how progressively increasing discrepancy between naive Bayes assumption of the conditional independence of the predictor variables negatively impacts its performance, while LDA with the assumption of common covariance (that is true in this case) is not sensitive to increasing correlation between predictors.
